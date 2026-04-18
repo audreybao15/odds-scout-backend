@@ -106,7 +106,7 @@ async def fetch_polymarket():
         print(f"Polymarket error: {e}")
         return []
 
-async def kimi_batch_match(kalshi_events, polymarket_markets, kimi_key, threshold=0.6):
+async def kimi_batch_match(kalshi_events, polymarket_markets, kimi_key, threshold=0.25):
     if not kimi_key:
         return []
     matches = []
@@ -198,7 +198,7 @@ def combined_similarity(k_text, p_text):
         return 0.0
     return jaccard_similarity(k_norm, p_norm)
 
-def find_matches_basic(kalshi_events, polymarket_markets, threshold=0.25):
+def find_matches_basic(kalshi_events, polymarket_markets, threshold=0.15):
     matches = []
     for k_event in kalshi_events:
         k_title = get_kalshi_event_title(k_event)
@@ -247,7 +247,7 @@ def pending_trades():
 def get_matches():
     data = request.get_json() or {}
     use_kimi = data.get("use_kimi", True)
-    min_sim = data.get("min_similarity", 0.6)
+    min_sim = data.get("min_similarity", 0.25)
     kimi_key = settings_store.get("kimi_api_key", "")
 
     loop = asyncio.new_event_loop()
@@ -303,12 +303,12 @@ def scan():
     if kimi_key:
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
-        matches = loop.run_until_complete(kimi_batch_match(kalshi_events, polymarket_markets, kimi_key, threshold=0.6))
+        matches = loop.run_until_complete(kimi_batch_match(kalshi_events, polymarket_markets, kimi_key, threshold=0.25))
         loop.close()
         if not matches:
-            matches = find_matches_basic(kalshi_events, polymarket_markets, threshold=0.25)
+            matches = find_matches_basic(kalshi_events, polymarket_markets, threshold=0.15)
     else:
-        matches = find_matches_basic(kalshi_events, polymarket_markets, threshold=0.25)
+        matches = find_matches_basic(kalshi_events, polymarket_markets, threshold=0.15)
 
     opportunities = []
     for match in matches[:30]:
@@ -322,79 +322,4 @@ def scan():
             continue
         k_odds = 1 / k_price
         p_odds = 1 / p_price
-        total_prob = (1/k_odds) + (1/p_odds)
-        if total_prob < 1:
-            stake_a = budget * (1/k_odds) / total_prob
-            stake_b = budget * (1/p_odds) / total_prob
-            k_return = stake_a * k_odds * (1 - 0.005)
-            p_return = stake_b * p_odds * (1 - 0.02)
-            total_stake = stake_a + stake_b
-            profit = min(k_return, p_return) - total_stake
-            profit_pct = (profit / total_stake) * 100 if total_stake > 0 else 0
-            if profit_pct >= min_profit:
-                opportunities.append({
-                    "id": str(hash(match["kalshi_title"])),
-                    "event_name": match["kalshi_title"][:60],
-                    "similarity": match["similarity"],
-                    "profit_percent": round(profit_pct, 2),
-                    "profit_amount": round(profit, 2),
-                    "total_investment": round(total_stake, 2),
-                    "kalshi": {"stake": round(stake_a, 2), "odds": round(k_odds, 2), "price": k_price, "side": "YES"},
-                    "polymarket": {"stake": round(stake_b, 2), "odds": round(p_odds, 2), "price": p_price, "side": "NO"}
-                })
-
-    opportunities.sort(key=lambda x: x["profit_percent"], reverse=True)
-
-    last_scan.update({
-        "opportunities": opportunities,
-        "last_scan_time": datetime.now().isoformat(),
-        "is_scanning": False
-    })
-
-    return jsonify({
-        "status": "success",
-        "opportunities_found": len(opportunities),
-        "budget": budget,
-        "data": opportunities
-    })
-
-@app.route('/api/opportunities')
-def get_opportunities():
-    return jsonify(last_scan["opportunities"])
-
-@app.route('/api/debug')
-def debug():
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    kalshi_events, polymarket_markets = loop.run_until_complete(asyncio.gather(fetch_kalshi_events(), fetch_polymarket()))
-    loop.close()
-
-    k_titles = [get_kalshi_event_title(e)[:80] for e in kalshi_events[:15]]
-    p_titles = [get_polymarket_title(m)[:80] for m in polymarket_markets[:15]]
-
-    all_matches = []
-    for k in kalshi_events[:50]:
-        k_title = get_kalshi_event_title(k)
-        for p in polymarket_markets[:50]:
-            p_title = get_polymarket_title(p)
-            sim = combined_similarity(k_title, p_title)
-            if sim > 0.15:
-                all_matches.append({
-                    "kalshi": k_title[:60],
-                    "polymarket": p_title[:60],
-                    "similarity": round(sim, 3)
-                })
-
-    all_matches.sort(key=lambda x: x["similarity"], reverse=True)
-
-    return jsonify({
-        "kalshi_count": len(kalshi_events),
-        "polymarket_count": len(polymarket_markets),
-        "kalshi_sample_titles": k_titles,
-        "polymarket_sample_titles": p_titles,
-        "potential_matches": all_matches[:20]
-    })
-
-if __name__ == '__main__':
-    port = int(os.environ.get('PORT', 5000))
-    app.run(host='0.0.0.0', port=port, debug=False)
+        total_prob =

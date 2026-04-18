@@ -39,6 +39,60 @@ last_scan = {
     "matches": []
 }
 
+# ========== SPORTS FILTERING ==========
+
+SPORTS_KEYWORDS = [
+    'nba', 'nfl', 'nhl', 'mlb', 'ncaab', 'ncaa', 'ufc', 'mma', 'boxing',
+    'formula 1', 'f1', 'nascar', 'motogp', 'tennis', 'golf', 'pga',
+    'soccer', 'premier league', 'la liga', 'bundesliga', 'serie a', 'champions league',
+    'world cup', 'olympics', 'super bowl', 'stanley cup', 'world series',
+    'basketball', 'football', 'hockey', 'baseball', 'vs', 'versus', 'wins',
+    'champions', 'tournament', 'playoff', 'final', 'grand slam',
+    'verstappen', 'hamilton', 'lebron', 'mahomes', 'brady', 'messi', 'ronaldo',
+    'lakers', 'celtics', 'warriors', 'chiefs', 'eagles', 'cowboys',
+    'manchest', 'arsenal', 'liverpool', 'barcelona', 'real madrid',
+    'point', 'score', 'over', 'under', 'spread', 'run', 'goal'
+]
+
+POLITICAL_KEYWORDS = [
+    'president', 'election', 'vote', 'senate', 'congress', 'parliament',
+    'prime minister', 'ipo', 'mars', 'volcano', 'climate', 'temperature',
+    'pope', 'oscar', 'academy award', 'fusion', 'nuclear', 'brex', 'ramp',
+    'anthropic', 'openai ipo', 'zelensky', 'putin', 'xi jinping',
+    'netanyahu', 'musk mars', 'supervolcano', 'earthquake'
+]
+
+
+def is_sports_market(title):
+    if not title:
+        return False
+    title_lower = title.lower()
+    for keyword in POLITICAL_KEYWORDS:
+        if keyword in title_lower:
+            return False
+    for keyword in SPORTS_KEYWORDS:
+        if keyword in title_lower:
+            return True
+    if re.search(r'\b\w+\s+(?:vs\.?|versus|@)\s+\w+\b', title_lower):
+        return True
+    if re.search(r'\w+\s+\w+:\s*\d+', title_lower):
+        return True
+    return False
+
+
+def filter_sports_markets(markets, is_kalshi=True):
+    sports = []
+    for m in markets:
+        if is_kalshi:
+            title = m.get("title", "") or m.get("ticker", "")
+        else:
+            title = m.get("question", "") or m.get("slug", "")
+        if is_sports_market(title):
+            sports.append(m)
+    return sports
+
+
+# ========== HELPER FUNCTIONS ==========
 
 def generate_kalshi_signature(key_id, key_secret, timestamp, method, path, body=""):
     message = f"{key_id}{timestamp}{method}{path}{body}"
@@ -71,6 +125,8 @@ def get_kalshi_event_title(event):
     return "Unknown Event"
 
 
+# ========== FETCH MARKETS ==========
+
 async def fetch_kalshi_events():
     try:
         key_id = settings_store.get("kalshi_api_key", "")
@@ -93,7 +149,9 @@ async def fetch_kalshi_events():
             async with s.get(url, headers=headers, timeout=30) as r:
                 if r.status == 200:
                     data = await r.json()
-                    return data.get("events", [])
+                    events = data.get("events", [])
+                    sports_events = filter_sports_markets(events, is_kalshi=True)
+                    return sports_events
                 return []
     except Exception as e:
         print(f"Kalshi error: {e}")
@@ -107,22 +165,26 @@ async def fetch_polymarket():
             async with s.get(url, timeout=30) as r:
                 if r.status == 200:
                     data = await r.json()
-                    return data if isinstance(data, list) else data.get("data", [])
+                    markets = data if isinstance(data, list) else data.get("data", [])
+                    sports_markets = filter_sports_markets(markets, is_kalshi=False)
+                    return sports_markets
     except Exception as e:
         print(f"Polymarket error: {e}")
-        return []
+    return []
 
 
-async def kimi_batch_match(kalshi_events, polymarket_markets, kimi_key, threshold=0.25):
+# ========== KIMI AI MATCHING ==========
+
+async def kimi_batch_match(kalshi_events, polymarket_markets, kimi_key, threshold=0.5):
     if not kimi_key:
         return []
 
     matches = []
     comparison_list = []
 
-    for k_event in kalshi_events[:15]:
+    for k_event in kalshi_events[:20]:
         k_title = get_kalshi_event_title(k_event)
-        for p_market in polymarket_markets[:15]:
+        for p_market in polymarket_markets[:20]:
             p_title = get_polymarket_title(p_market)
             comparison_list.append({
                 "kalshi_title": k_title,
@@ -144,35 +206,33 @@ async def kimi_batch_match(kalshi_events, polymarket_markets, kimi_key, threshol
 
             comparisons_text = "\n".join([
                 f"{i+1}. Kalshi: \"{c['kalshi_title']}\" vs Polymarket: \"{c['polymarket_title']}\""
-                for i, c in enumerate(comparison_list[:15])
+                for i, c in enumerate(comparison_list)
             ])
 
-            prompt = f"""You are an expert at matching prediction markets. Compare each pair and identify which are the SAME event.
+            prompt = f"""You are an expert sports betting analyst. Match the SAME sports events between two platforms.
 
 {comparisons_text}
 
-For each pair, respond in this exact format:
-NUMBER: SAME or DIFFERENT (confidence 0-100)
+Rules:
+- SAME = Same game (e.g., "Lakers vs Celtics" = "NBA: Lakers vs Celtics")
+- DIFFERENT = Different events
+- Be STRICT - only mark SAME if 100% certain
 
-Example:
-1: SAME (95)
-2: DIFFERENT (10)
-
-Only mark as SAME if you're confident they're the same event."""
+Format: NUMBER: SAME or DIFFERENT (confidence 0-100)"""
 
             payload = {
                 "model": "kimi-k2.5",
                 "messages": [{"role": "user", "content": prompt}],
-                "temperature": 0.1,
-                "max_tokens": 500
+                "temperature": 0.05,
+                "max_tokens": 1000
             }
 
-            async with s.post(url, headers=headers, json=payload, timeout=60) as r:
+            async with s.post(url, headers=headers, json=payload, timeout=90) as r:
                 if r.status == 200:
                     data = await r.json()
                     content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
 
-                    for i, item in enumerate(comparison_list[:15]):
+                    for i, item in enumerate(comparison_list):
                         pattern = rf"{i+1}[\.:\s]+(SAME|DIFFERENT)[\s\(]*(\d+)"
                         match = re.search(pattern, content, re.IGNORECASE)
 
@@ -189,15 +249,13 @@ Only mark as SAME if you're confident they're the same event."""
                                     "polymarket_market": item["polymarket_market"],
                                     "matched_by": "kimi"
                                 })
-
-                    print(f"Kimi found {len(matches)} matches")
-                else:
-                    print(f"Kimi API error: {r.status}")
     except Exception as e:
         print(f"Kimi error: {e}")
 
     return matches
 
+
+# ========== BASIC MATCHING ==========
 
 def normalize_text(text):
     if not text:
@@ -223,21 +281,33 @@ def jaccard_similarity(s1, s2):
     return len(set1 & set2) / len(set1 | set2)
 
 
-def combined_similarity(k_text, p_text):
-    k_norm = normalize_text(k_text)
-    p_norm = normalize_text(p_text)
-    if not k_norm or not p_norm:
+def team_overlap_similarity(k_text, p_text):
+    k_lower = k_text.lower()
+    p_lower = p_text.lower()
+    k_teams = re.findall(r'(\w+(?:\s+\w+){0,2})\s+(?:vs\.?|@|versus)', k_lower)
+    p_teams = re.findall(r'(\w+(?:\s+\w+){0,2})\s+(?:vs\.?|@|versus)', p_lower)
+    if not k_teams or not p_teams:
         return 0.0
-    return jaccard_similarity(k_norm, p_norm)
+    matches = 0
+    for kt in k_teams:
+        for pt in p_teams:
+            if kt in pt or pt in kt or SequenceMatcher(None, kt, pt).ratio() > 0.6:
+                matches += 1
+                break
+    return matches / max(len(k_teams), len(p_teams))
 
 
-def find_matches_basic(kalshi_events, polymarket_markets, threshold=0.15):
+def find_matches_basic(kalshi_events, polymarket_markets, threshold=0.3):
     matches = []
     for k_event in kalshi_events:
         k_title = get_kalshi_event_title(k_event)
+        k_norm = normalize_text(k_title)
         for p_market in polymarket_markets:
             p_title = get_polymarket_title(p_market)
-            similarity = combined_similarity(k_title, p_title)
+            p_norm = normalize_text(p_title)
+            text_sim = jaccard_similarity(k_norm, p_norm)
+            team_sim = team_overlap_similarity(k_title, p_title)
+            similarity = (text_sim * 0.4) + (team_sim * 0.6)
             if similarity >= threshold:
                 matches.append({
                     "kalshi_title": k_title,
@@ -250,6 +320,8 @@ def find_matches_basic(kalshi_events, polymarket_markets, threshold=0.15):
     matches.sort(key=lambda x: x["similarity"], reverse=True)
     return matches
 
+
+# ========== ROUTES ==========
 
 @app.route('/api/status')
 def status():
@@ -286,6 +358,7 @@ def get_matches():
     data = request.get_json() or {}
     use_kimi = data.get("use_kimi", True)
     min_sim = data.get("min_similarity", 0.25)
+    sports_only = data.get("sports_only", True)
     kimi_key = settings_store.get("kimi_api_key", "")
 
     loop = asyncio.new_event_loop()
@@ -295,12 +368,13 @@ def get_matches():
     )
     loop.close()
 
-    print(f"Kalshi: {len(kalshi_events)}, Polymarket: {len(polymarket_markets)}, Kimi: {bool(kimi_key)}")
+    if sports_only:
+        kalshi_events = filter_sports_markets(kalshi_events, is_kalshi=True)
+        polymarket_markets = filter_sports_markets(polymarket_markets, is_kalshi=False)
 
     all_matches = []
 
     if use_kimi and kimi_key:
-        print("Using Kimi AI matching...")
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         kimi_matches = loop.run_until_complete(
@@ -308,11 +382,8 @@ def get_matches():
         )
         loop.close()
         all_matches.extend(kimi_matches)
-        print(f"Kimi returned {len(kimi_matches)} matches")
 
-    print("Running basic matching...")
     basic_matches = find_matches_basic(kalshi_events, polymarket_markets, threshold=min_sim)
-
     existing_pairs = {(m["kalshi_title"], m["polymarket_title"]) for m in all_matches}
     for bm in basic_matches:
         if (bm["kalshi_title"], bm["polymarket_title"]) not in existing_pairs:
@@ -326,15 +397,14 @@ def get_matches():
         "polymarket_markets": len(polymarket_markets)
     })
 
-    print(f"Total matches found: {len(all_matches)}")
-
     return jsonify({
         "status": "success",
         "matches_found": len(all_matches),
         "kalshi_count": len(kalshi_events),
         "polymarket_count": len(polymarket_markets),
-        "matches": all_matches[:50],
-        "kimi_used": bool(use_kimi and kimi_key)
+        "matches": all_matches[:200],
+        "kimi_used": bool(use_kimi and kimi_key),
+        "sports_only": sports_only
     })
 
 
@@ -354,17 +424,20 @@ def scan():
     )
     loop.close()
 
+    kalshi_events = filter_sports_markets(kalshi_events, is_kalshi=True)
+    polymarket_markets = filter_sports_markets(polymarket_markets, is_kalshi=False)
+
     if kimi_key:
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         matches = loop.run_until_complete(
-            kimi_batch_match(kalshi_events, polymarket_markets, kimi_key, threshold=0.25)
+            kimi_batch_match(kalshi_events, polymarket_markets, kimi_key, threshold=0.5)
         )
         loop.close()
         if not matches:
-            matches = find_matches_basic(kalshi_events, polymarket_markets, threshold=0.15)
+            matches = find_matches_basic(kalshi_events, polymarket_markets, threshold=0.3)
     else:
-        matches = find_matches_basic(kalshi_events, polymarket_markets, threshold=0.15)
+        matches = find_matches_basic(kalshi_events, polymarket_markets, threshold=0.3)
 
     opportunities = []
     for match in matches[:30]:
@@ -443,30 +516,18 @@ def debug():
     )
     loop.close()
 
-    k_titles = [get_kalshi_event_title(e)[:80] for e in kalshi_events[:15]]
-    p_titles = [get_polymarket_title(m)[:80] for m in polymarket_markets[:15]]
-
-    all_matches = []
-    for k in kalshi_events[:50]:
-        k_title = get_kalshi_event_title(k)
-        for p in polymarket_markets[:50]:
-            p_title = get_polymarket_title(p)
-            sim = combined_similarity(k_title, p_title)
-            if sim > 0.15:
-                all_matches.append({
-                    "kalshi": k_title[:60],
-                    "polymarket": p_title[:60],
-                    "similarity": round(sim, 3)
-                })
-
-    all_matches.sort(key=lambda x: x["similarity"], reverse=True)
+    kalshi_sports = filter_sports_markets(kalshi_events, is_kalshi=True)
+    polymarket_sports = filter_sports_markets(polymarket_markets, is_kalshi=False)
 
     return jsonify({
         "kalshi_count": len(kalshi_events),
+        "kalshi_sports_count": len(kalshi_sports),
         "polymarket_count": len(polymarket_markets),
-        "kalshi_sample_titles": k_titles,
-        "polymarket_sample_titles": p_titles,
-        "potential_matches": all_matches[:20]
+        "polymarket_sports_count": len(polymarket_sports),
+        "kalshi_sample_titles": [get_kalshi_event_title(e)[:80] for e in kalshi_events[:10]],
+        "polymarket_sample_titles": [get_polymarket_title(m)[:80] for m in polymarket_markets[:10]],
+        "kalshi_sports_sample": [get_kalshi_event_title(e)[:80] for e in kalshi_sports[:10]],
+        "polymarket_sports_sample": [get_polymarket_title(m)[:80] for m in polymarket_sports[:10]],
     })
 
 
